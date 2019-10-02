@@ -25,14 +25,14 @@ namespace sio
 {
     /*************************public:*************************/
     client_impl::client_impl() :
-        m_con_state(con_closed),
         m_ping_interval(0),
         m_ping_timeout(0),
         m_network_thread(),
-        m_reconn_attempts(0xFFFFFFFF),
-        m_reconn_made(0),
+        m_con_state(con_closed),
         m_reconn_delay(5000),
-        m_reconn_delay_max(25000)
+        m_reconn_delay_max(25000),
+        m_reconn_attempts(0xFFFFFFFF),
+        m_reconn_made(0)
     {
         using websocketpp::log::alevel;
 #ifndef DEBUG
@@ -95,7 +95,8 @@ namespace sio
             query_str.append("&");
             query_str.append(it->first);
             query_str.append("=");
-            query_str.append(it->second);
+            string query_str_value=encode_query_string(it->second);
+            query_str.append(query_str_value);
         }
         m_query_string=move(query_str);
 
@@ -278,12 +279,11 @@ namespace sio
         if(ec || m_con.expired())
         {
             if (ec != boost::asio::error::operation_aborted)
-                LOG("ping exit,con is expired?"<<m_con.expired()<<",ec:"<<ec.message()<<endl);
+                LOG("ping exit,con is expired?"<<m_con.expired()<<",ec:"<<ec.message()<<endl){};
             return;
         }
         packet p(packet::frame_ping);
-        m_packet_mgr.encode(p,
-                            [&](bool isBin,shared_ptr<const string> payload)
+        m_packet_mgr.encode(p, [&](bool /*isBin*/,shared_ptr<const string> payload)
         {
             lib::error_code ec;
             this->m_client.send(this->m_con, *payload, frame::opcode::text, ec);
@@ -363,7 +363,7 @@ namespace sio
         }
     }
 
-    void client_impl::on_fail(connection_hdl con)
+    void client_impl::on_fail(connection_hdl)
     {
         m_con.reset();
         m_con_state = con_closed;
@@ -399,6 +399,7 @@ namespace sio
     void client_impl::on_close(connection_hdl con)
     {
         LOG("Client Disconnected." << endl);
+        con_state m_con_state_was = m_con_state;
         m_con_state = con_closed;
         lib::error_code ec;
         close::status::value code = close::status::normal;
@@ -414,7 +415,11 @@ namespace sio
         m_con.reset();
         this->clear_timers();
         client::close_reason reason;
-        if(code == close::status::normal)
+
+        // If we initiated the close, no matter what the close status was,
+        // we'll consider it a normal close. (When using TLS, we can
+        // sometimes get a TLS Short Read error when closing.)
+        if(code == close::status::normal || m_con_state_was == con_closing)
         {
             this->sockets_invoke_void(&sio::socket::on_disconnect);
             reason = client::close_reason_normal;
@@ -442,7 +447,7 @@ namespace sio
         }
     }
     
-    void client_impl::on_message(connection_hdl con, client_type::message_ptr msg)
+    void client_impl::on_message(connection_hdl, client_type::message_ptr msg)
     {
         if (m_ping_timeout_timer) {
             boost::system::error_code ec;
@@ -488,7 +493,7 @@ namespace sio
             m_ping_timer.reset(new boost::asio::deadline_timer(m_client.get_io_service()));
             boost::system::error_code ec;
             m_ping_timer->expires_from_now(milliseconds(m_ping_interval), ec);
-            if(ec)LOG("ec:"<<ec.message()<<endl);
+            if(ec)LOG("ec:"<<ec.message()<<endl){};
             m_ping_timer->async_wait(lib::bind(&client_impl::ping,this,lib::placeholders::_1));
             LOG("On handshake,sid:"<<m_sid<<",ping interval:"<<m_ping_interval<<",ping timeout"<<m_ping_timeout<<endl);
             return;
@@ -578,4 +583,19 @@ failed:
         return ctx;
     }
 #endif
+
+    std::string client_impl::encode_query_string(const std::string &query){
+        ostringstream ss;
+        ss << std::hex;
+        // Percent-encode (RFC3986) non-alphanumeric characters.
+        for(const char c : query){
+            if((c >= 'a' && c <= 'z') || (c>= 'A' && c<= 'Z') || (c >= '0' && c<= '9')){
+                ss << c;
+            } else {
+                ss << '%' << std::uppercase << std::setw(2) << int((unsigned char) c) << std::nouppercase;
+            }
+        }
+        ss << std::dec;
+        return ss.str();
+    }
 }
